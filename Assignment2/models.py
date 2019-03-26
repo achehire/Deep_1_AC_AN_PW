@@ -232,7 +232,7 @@ class RNN(nn.Module): # Implement a stacked vanilla RNN with Tanh nonlinearities
             out = self.lin_o(x_t)
             soft = nn.Softmax(-1)
             probas = soft(out)
-            samples.append(torch.multinomial(probas, num_samples=1))
+            samples.append(torch.multinomial(probas, num_samples=1).view(-1))
 
         return torch.stack(samples)
 
@@ -387,7 +387,7 @@ class GRU(nn.Module): # Implement a stacked GRU RNN
             out = self.lin_o(x_t)
             soft = nn.Softmax(-1)
             probas = soft(out)
-            samples.append(torch.multinomial(probas, num_samples=1))
+            samples.append(torch.multinomial(probas, num_samples=1).view(-1))
 
         return torch.stack(samples)
 
@@ -477,17 +477,25 @@ class MultiHeadedAttention(nn.Module):
         # Note: the only Pytorch modules you are allowed to use are nn.Linear
         # and nn.Dropout
         # ETA: you can also use softmax
-        self.lin_q = nn.Linear(n_units, n_units)
-        self.lin_k = nn.Linear(n_units, n_units)
-        self.lin_v = nn.Linear(n_units, n_units)
-        self.lin_o = nn.Linear(n_units, n_units)
+        self.lin_q = clones(nn.Linear(self.n_units, self.d_k, bias=True), n_heads)
+        self.lin_k = clones(nn.Linear(self.n_units, self.d_k, bias=True), n_heads)
+        self.lin_v = clones(nn.Linear(self.n_units, self.d_k, bias=True), n_heads)
+        self.lin_o = nn.Linear(self.n_units, self.n_units, bias=True)
         self.drop = nn.Dropout(dropout)
 
         # init:
         k = 1.0/math.sqrt(n_units)
-        init.uniform_(self.lin_q.weight, -k, k)
-        init.uniform_(self.lin_k.weight, -k, k)
-        init.uniform_(self.lin_v.weight, -k, k)
+
+        for head in range(n_heads):
+
+            init.uniform_(self.lin_q[head].weight, -k, k)
+            init.uniform_(self.lin_k[head].weight, -k, k)
+            init.uniform_(self.lin_v[head].weight, -k, k)
+            init.uniform_(self.lin_q[head].bias, -k, k)
+            init.uniform_(self.lin_k[head].bias, -k, k)
+            init.uniform_(self.lin_v[head].bias, -k, k)
+
+        init.uniform_(self.lin_o.bias, -k, k)
         init.uniform_(self.lin_o.weight, -k, k)
 
     def forward(self, query, key, value, mask=None):
@@ -499,27 +507,24 @@ class MultiHeadedAttention(nn.Module):
         # generating the "attention values" (i.e. A_i in the .tex)
         # Also apply dropout to the attention values.
 
+        H = []
         soft = torch.nn.Softmax(dim=-1)
-        batch_size = query.size(0)
 
-        a_q = self.lin_q(query).view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)
-        a_k = self.lin_k(key).view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)
-        a_v = self.lin_v(value).view(batch_size, -1, self.n_heads, self.d_k).transpose(1,2)
+        for head in range(self.n_heads):
 
-        x = torch.matmul(a_q, a_k.transpose(2, 3)) / math.sqrt(self.d_k)
-        mask = mask.unsqueeze(1).float()  # to make matrix multiplication possible
-        a_i = soft(x*mask - 10**9*(1-mask))
+            a_q = self.lin_q[head](query)
+            a_k = self.lin_k[head](key)
+            a_v = self.lin_v[head](value)
+            x = torch.matmul(a_q, a_k.transpose(1,2)) / math.sqrt(self.d_k)
+            mask = mask.float() # the given mask is Byte
+            a_i = soft(x*mask - 10**9*(1-mask))
+            h_i = torch.matmul(self.drop(a_i), a_v)
+            H.append(h_i)
 
-        h_i = torch.matmul(self.drop(a_i), a_v)
-        h = h_i.transpose(1, 2).contiguous().view(batch_size, -1, self.n_units)
-        a = self.lin_o(h)
+        H = torch.cat(H, dim=2)
+        A = self.lin_o(H)
 
-        return a  # size: (batch_size, seq_len, self.n_units)
-
-
-
-
-
+        return A
 
 #----------------------------------------------------------------------------------
 # The encodings of elements of the input sequence
